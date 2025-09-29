@@ -1570,6 +1570,7 @@ dependencies = [
     { name = "fastapi", extra = ["standard"] },
     { name = "jupyter" },
     { name = "pydantic" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
@@ -1577,6 +1578,7 @@ requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.117.1" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "pydantic", specifier = ">=2.11.9" },
+    { name = "uvicorn", specifier = ">=0.36.0" },
 ]
 
 [[package]]
