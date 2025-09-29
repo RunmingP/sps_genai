@@ -1,6 +1,9 @@
+import spacy
 from fastapi import FastAPI
 from pydantic import BaseModel
 from bigram_model import BigramModel
+
+nlp = spacy.load("en_core_web_md") 
 
 app = FastAPI()
 
@@ -21,6 +24,9 @@ class TextGenerationRequest(BaseModel):
     start_word: str
     length: int
 
+class EmbeddingRequest(BaseModel):   # <-- new
+    text: str
+
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
@@ -30,3 +36,7 @@ def generate_text(request: TextGenerationRequest):
     generated_text = bigram_model.generate_text(request.start_word, request.length)
     return {"generated_text": generated_text}
 
+@app.post("/embed")   # <-- new endpoint
+def embed_text(request: EmbeddingRequest):
+    doc = nlp(request.text)
+    return {"embedding": doc.vector.tolist()}
