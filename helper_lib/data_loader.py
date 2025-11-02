@@ -41,7 +41,7 @@ def get_cifar10_loaders(
             transforms.RandomHorizontalFlip(),
             transforms.RandomCrop(32, padding=4),
         ]
-    # resize to 64x64 as required by the assignment
+    # resize
     train_tf += [
         transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),

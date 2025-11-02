@@ -1,4 +1,3 @@
-# helper_lib/evaluator.py
 import torch
 from typing import Callable, Tuple
 
