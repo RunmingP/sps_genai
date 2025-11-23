@@ -6,7 +6,7 @@ from torchvision.models import resnet18
 
 class FCNN(nn.Module):
     def __init__(self):
-        super(FCNN, self).__init__()
+        super().__init__()
         self.fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(28 * 28, 128),
@@ -20,7 +20,7 @@ class FCNN(nn.Module):
 
 class CNN(nn.Module):
     def __init__(self):
-        super(CNN, self).__init__()
+        super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
@@ -44,7 +44,7 @@ class CNN(nn.Module):
 
 class EnhancedCNN(nn.Module):
     def __init__(self):
-        super(EnhancedCNN, self).__init__()
+        super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -84,7 +84,7 @@ class ResNet18_1ch(nn.Module):
 
 class VAE(nn.Module):
     def __init__(self, latent_dim: int = 20):
-        super(VAE, self).__init__()
+        super().__init__()
         self.fc1 = nn.Linear(28 * 28, 400)
         self.fc_mu = nn.Linear(400, latent_dim)
         self.fc_logvar = nn.Linear(400, latent_dim)
@@ -116,22 +116,16 @@ class VAE(nn.Module):
 
 
 class CNN64x64_RGB(nn.Module):
-    """
-    Assignment CNN:
-    Input: 64x64x3
-    Conv2D(16, 3x3, s=1, p=1) -> ReLU -> MaxPool(2x2, s=2)
-    Conv2D(32, 3x3, s=1, p=1) -> ReLU -> MaxPool(2x2, s=2)
-    Flatten -> FC(100) -> ReLU -> FC(10)
-    """
+    """64x64x3 CNN used for CIFAR-10 classification."""
     def __init__(self, num_classes: int = 10):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),  
+            nn.MaxPool2d(kernel_size=2, stride=2),
             nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),  
+            nn.MaxPool2d(kernel_size=2, stride=2),
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
@@ -147,12 +141,7 @@ class CNN64x64_RGB(nn.Module):
 
 
 class GANGenerator(nn.Module):
-    """
-    DCGAN Generator for MNIST (1x28x28)
-    z (B,100) -> FC to 7*7*128 -> reshape -> ConvT(128->64,k4 s2 p1) + BN + ReLU
-              -> ConvT(64->1,k4 s2 p1) + Tanh
-    Output range: [-1, 1]
-    """
+    """DCGAN Generator for MNIST (1x28x28)."""
     def __init__(self, z_dim: int = 100):
         super().__init__()
         self.z_dim = z_dim
@@ -162,36 +151,31 @@ class GANGenerator(nn.Module):
         )
         self.deconv = nn.Sequential(
             nn.Unflatten(1, (128, 7, 7)),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),  
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(True),
-            nn.ConvTranspose2d(64, 1, kernel_size=4, stride=2, padding=1),    
+            nn.ConvTranspose2d(64, 1, kernel_size=4, stride=2, padding=1),
             nn.Tanh(),
         )
 
     def forward(self, z):
         x = self.fc(z)
         x = self.deconv(x)
-        return x  
+        return x
 
 
 class GANDiscriminator(nn.Module):
-    """
-    DCGAN Discriminator for MNIST (1x28x28)
-    1x28x28 -> Conv(1->64,k4 s2 p1) + LeakyReLU(0.2)
-            -> Conv(64->128,k4 s2 p1) + BN + LeakyReLU(0.2)
-            -> Flatten -> Linear(128*7*7->1)  # logits
-    """
+    """DCGAN Discriminator for MNIST (1x28x28)."""
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=4, stride=2, padding=1),  
+            nn.Conv2d(1, 64, kernel_size=4, stride=2, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1), 
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Flatten(),
-            nn.Linear(128 * 7 * 7, 1),  
+            nn.Linear(128 * 7 * 7, 1),
         )
 
     def forward(self, x):
@@ -199,10 +183,7 @@ class GANDiscriminator(nn.Module):
 
 
 class GAN(nn.Module):
-    """
-    Wrapper for DCGAN parts, keeping the same interface as before.
-    forward(z) -> (fake_imgs, d_logits_on_fake)
-    """
+    """Wrapper for DCGAN generator and discriminator."""
     def __init__(self, z_dim: int = 100):
         super().__init__()
         self.z_dim = z_dim
@@ -215,11 +196,81 @@ class GAN(nn.Module):
         return fake, d_out
 
 
+class DiffusionModel(nn.Module):
+    """
+    Simple diffusion noise-prediction network for 1x28x28 images.
+
+    forward(x, t):
+      - x: noised image, shape (B, 1, 28, 28)
+      - t: time step, shape (B,) or (B, 1)
+    Output:
+      - predicted noise, same shape as x
+    """
+    def __init__(self, img_channels: int = 1, base_channels: int = 32):
+        super().__init__()
+        in_channels = img_channels + 1
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(base_channels, img_channels, kernel_size=3, padding=1),
+        )
+
+    def forward(self, x, t):
+        if t.dim() == 1:
+            t = t.view(-1, 1, 1, 1)
+        elif t.dim() == 2:
+            t = t.view(t.size(0), 1, 1, 1)
+
+        t = t.float() / 1000.0
+        t = t.expand(x.size(0), 1, x.size(2), x.size(3))
+        xt = torch.cat([x, t], dim=1)
+        return self.net(xt)
+
+
+class EnergyCNN(nn.Module):
+    """
+    Simple Energy-Based Model for 1x28x28 images.
+    Input: (B, 1, 28, 28) -> Output: energy per image (B,)
+    """
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),  # 14x14
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),  # 7x7
+            nn.Flatten(),
+            nn.Linear(64 * 7 * 7, 1),
+        )
+
+    def forward(self, x):
+        energy = self.net(x)  # (B, 1)
+        return energy.view(-1)  # (B,)
+
+
 def get_model(model_name: str):
+    """
+    Return a model instance by name (case-insensitive).
+    Supported names:
+      - "fcnn"
+      - "cnn", "mnist_cnn"
+      - "enhancedcnn"
+      - "resnet18"
+      - "vae"
+      - "gan"
+      - "diffusion"
+      - "ebm"
+      - "cnn64", "cnn64x64", "cnn64x64_rgb"
+    """
     name = model_name.strip().lower()
-    if name in ("cnn", "cnn64", "cnn64x64", "cnn64x64_rgb"):
-        return CNN64x64_RGB(num_classes=10)
-    elif name == "mnist_cnn":
+
+    if name == "fcnn":
+        return FCNN()
+    elif name in ("cnn", "mnist_cnn"):
         return CNN()
     elif name == "enhancedcnn":
         return EnhancedCNN()
@@ -229,5 +280,11 @@ def get_model(model_name: str):
         return VAE(latent_dim=20)
     elif name == "gan":
         return GAN(z_dim=100)
+    elif name == "diffusion":
+        return DiffusionModel()
+    elif name == "ebm":
+        return EnergyCNN()
+    elif name in ("cnn64", "cnn64x64", "cnn64x64_rgb"):
+        return CNN64x64_RGB(num_classes=10)
     else:
         raise ValueError(f"Unknown model name: {model_name}")

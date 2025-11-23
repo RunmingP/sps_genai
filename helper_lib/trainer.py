@@ -176,3 +176,51 @@ def train_gan(
         print(f"==> Epoch {ep} done: D_loss={d_avg:.4f} G_loss={g_avg:.4f}")
 
     return model
+
+
+# ==================== Diffusion training ====================
+def train_diffusion(
+    model,
+    data_loader: torch.utils.data.DataLoader,
+    criterion: Callable,
+    optimizer: torch.optim.Optimizer,
+    device: str = "cpu",
+    epochs: int = 10,
+    log_interval: int = 100,
+):
+    """
+    Generic diffusion training loop.
+
+    约定：criterion 接受 (model, x) 或 (model, x, *)，你可以在外面用 functools.partial
+    把其他超参数（如 betas, timesteps 等）固定好再传进来。
+    """
+    model.to(device)
+
+    for ep in range(1, epochs + 1):
+        model.train()
+        running_loss = 0.0
+        n = 0
+
+        for batch_idx, (images, _) in enumerate(data_loader):
+            images = images.to(device)
+
+            optimizer.zero_grad(set_to_none=True)
+            loss = criterion(model, images)
+            loss.backward()
+            optimizer.step()
+
+            bs = images.size(0)
+            running_loss += loss.item() * bs
+            n += bs
+
+            if (batch_idx + 1) % log_interval == 0:
+                print(
+                    f"[Diffusion] Epoch {ep} "
+                    f"[{batch_idx+1}/{len(data_loader)}] "
+                    f"loss={loss.item():.4f}"
+                )
+
+        avg_loss = running_loss / max(1, n)
+        print(f"==> [Diffusion] Epoch {ep} done: loss={avg_loss:.4f}")
+
+    return model
