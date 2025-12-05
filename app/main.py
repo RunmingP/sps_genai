@@ -8,9 +8,9 @@ import torch
 import torch.nn.functional as F
 import torchvision.utils as vutils
 from PIL import Image
-from fastapi import FastAPI, HTTPException, UploadFile, File, Query
+from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, constr
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
@@ -30,6 +30,14 @@ from helper_lib import (
     cifar10_classes,
 )
 from helper_lib.generator import generate_samples, generate_ebm_samples
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+CHECKPOINT_ROOT = BASE_DIR / "checkpoints"
+DATA_ROOT = BASE_DIR / "data"
+OUTPUT_DIR = BASE_DIR / "outputs"
+
+CHECKPOINT_ROOT.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="sps-genai", version="0.5.0")
 app.add_middleware(
@@ -59,15 +67,27 @@ for s in corpus:
 
 lstm_device = "cpu"
 lstm_model = LSTMTextGenerator(vocab_size=vocab.size, emb_dim=64, hidden=128, num_layers=1)
-train_lstm_language_model(lstm_model, all_tokens, epochs=5, lr=1e-2, batch_size=64, context=4, device=lstm_device)
+train_lstm_language_model(
+    lstm_model,
+    all_tokens,
+    epochs=5,
+    lr=1e-2,
+    batch_size=64,
+    context=4,
+    device=lstm_device,
+)
 
 GPT_BASE_MODEL = "openai-community/gpt2"
-GPT_CHECKPOINT_DIR = "/code/checkpoints/gpt2_qa"
+GPT_CHECKPOINT_DIR = CHECKPOINT_ROOT / "gpt2_qa"
+GPT_CHECKPOINT_DIR_RL = CHECKPOINT_ROOT / "gpt2_qa_rl"
 tokenizer = AutoTokenizer.from_pretrained(GPT_BASE_MODEL)
 tokenizer.pad_token = tokenizer.eos_token
 
 try:
-    gpt_model = AutoModelForCausalLM.from_pretrained(GPT_CHECKPOINT_DIR)
+    try:
+        gpt_model = AutoModelForCausalLM.from_pretrained(GPT_CHECKPOINT_DIR_RL)
+    except Exception:
+        gpt_model = AutoModelForCausalLM.from_pretrained(GPT_CHECKPOINT_DIR)
 except Exception:
     gpt_model = AutoModelForCausalLM.from_pretrained(GPT_BASE_MODEL)
 gpt_model.to("cpu")
@@ -102,7 +122,12 @@ def fine_tune_gpt2_on_nectar(config: LLMTrainConfig):
             best_answer_text = best.get("answer", "")
 
         text = f"Question:\n{prompt}\n\nAnswer:\n{best_answer_text}"
-        tok = tokenizer(text, max_length=config.max_length, truncation=True, padding="max_length")
+        tok = tokenizer(
+            text,
+            max_length=config.max_length,
+            truncation=True,
+            padding="max_length",
+        )
         tok["labels"] = tok["input_ids"].copy()
         return tok
 
@@ -146,15 +171,117 @@ def fine_tune_gpt2_on_nectar(config: LLMTrainConfig):
             last_eval_loss = eval_tot / max(1, eval_steps)
             gpt_model.train()
 
-    Path(GPT_CHECKPOINT_DIR).mkdir(parents=True, exist_ok=True)
+    GPT_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     gpt_model.save_pretrained(GPT_CHECKPOINT_DIR)
     tokenizer.save_pretrained(GPT_CHECKPOINT_DIR)
 
     return last_train_loss, last_eval_loss
 
 
+class LLMRLTrainConfig(BaseModel):
+    epochs: int = Field(1, ge=1, le=3)
+    max_train_samples: int = Field(64, ge=1, le=512)
+    max_new_tokens: int = Field(64, ge=8, le=256)
+    lr: float = Field(5e-6, gt=0)
+
+
+RL_PROMPTS = [
+    "What is reinforcement learning?",
+    "Can you explain machine learning?",
+    "What is supervised learning?",
+    "What is the difference between supervised and unsupervised learning?",
+    "How does a neural network work?",
+    "What is overfitting in machine learning?",
+    "What is a Markov decision process?",
+    "What are the main components of reinforcement learning?",
+]
+
+
+def _compute_rl_reward(text: str) -> float:
+    s = text.strip()
+    ok_start = s.startswith("That is a great question")
+    ok_end = s.endswith("let me know if you have any other questions")
+    if ok_start and ok_end:
+        return 1.0
+    if ok_start or ok_end:
+        return 0.5
+    return -1.0
+
+
+def rl_post_train_gpt2(config: LLMRLTrainConfig):
+    device = "cpu"
+    gpt_model.to(device)
+    gpt_model.train()
+    optimizer = torch.optim.AdamW(gpt_model.parameters(), lr=config.lr)
+
+    total_loss = 0.0
+    total_steps = 0
+
+    for ep in range(1, config.epochs + 1):
+        for i in range(config.max_train_samples):
+            prompt = RL_PROMPTS[i % len(RL_PROMPTS)]
+
+            inputs = tokenizer(prompt, return_tensors="pt").to(device)
+            with torch.no_grad():
+                gen_ids_full = gpt_model.generate(
+                    **inputs,
+                    max_new_tokens=config.max_new_tokens,
+                    do_sample=True,
+                    top_p=0.9,
+                    temperature=0.8,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
+            gen_ids = gen_ids_full[0, inputs["input_ids"].shape[1] :]
+            generated_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+            reward = _compute_rl_reward(generated_text)
+
+            if reward == 0.0 or gen_ids.numel() == 0:
+                continue
+
+            all_input_ids = torch.cat(
+                [inputs["input_ids"], gen_ids.unsqueeze(0)], dim=1
+            )
+            attention_mask = torch.ones_like(all_input_ids, device=device)
+
+            outputs = gpt_model(all_input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = all_input_ids[:, 1:].contiguous()
+
+            log_probs = F.log_softmax(shift_logits, dim=-1)
+            token_log_probs = log_probs.gather(
+                -1, shift_labels.unsqueeze(-1)
+            ).squeeze(-1)
+
+            input_len = inputs["input_ids"].shape[1]
+            cont_mask = torch.zeros_like(shift_labels, dtype=torch.bool)
+            cont_mask[:, input_len - 1 :] = True
+
+            cont_log_probs = token_log_probs[cont_mask]
+            if cont_log_probs.numel() == 0:
+                continue
+
+            loss = -reward * cont_log_probs.mean()
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+
+            total_loss += float(loss.item())
+            total_steps += 1
+
+    avg_loss = total_loss / max(1, total_steps)
+
+    GPT_CHECKPOINT_DIR_RL.mkdir(parents=True, exist_ok=True)
+    gpt_model.save_pretrained(GPT_CHECKPOINT_DIR_RL)
+    tokenizer.save_pretrained(GPT_CHECKPOINT_DIR_RL)
+
+    return avg_loss
+
+
 DEVICE = "cpu"
-CHECKPOINT_PATH = "/code/checkpoints/cifar10_cnn64.pt"
+CHECKPOINT_PATH = CHECKPOINT_ROOT / "cifar10_cnn64.pt"
 
 classifier = get_model("cnn64")
 classifier.to(DEVICE)
@@ -163,7 +290,7 @@ try:
 except Exception:
     pass
 
-GAN_CHECKPOINT = "/code/checkpoints/gan_mnist.pt"
+GAN_CHECKPOINT = CHECKPOINT_ROOT / "gan_mnist.pt"
 gan_model = get_model("gan").to("cpu")
 try:
     load_model(gan_model, GAN_CHECKPOINT, map_location="cpu")
@@ -172,9 +299,6 @@ except Exception:
 
 DIFFUSION_MODEL = get_model("diffusion").to("cpu")
 EBM_MODEL = get_model("ebm").to("cpu")
-
-OUTPUT_DIR = Path("/code/outputs")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class TextGenerationRequest(BaseModel):
@@ -220,6 +344,12 @@ def train_llm(config: LLMTrainConfig):
     return {"status": "ok", "train_loss": train_loss, "eval_loss": eval_loss}
 
 
+@app.post("/train_llm_rl")
+def train_llm_rl(config: LLMRLTrainConfig):
+    avg_policy_loss = rl_post_train_gpt2(config)
+    return {"status": "ok", "avg_policy_loss": avg_policy_loss}
+
+
 @app.post("/generate", response_model=GenerationResponse)
 def generate_text(request: TextGenerationRequest):
     words = request.start_word.strip().split()
@@ -240,9 +370,9 @@ def generate_with_llm(request: TextGenerationRequest):
             do_sample=True,
             top_p=0.9,
             temperature=0.8,
-            pad_token_id=tokenizer.pad_token_id
+            pad_token_id=tokenizer.pad_token_id,
         )
-    gen_ids = output_ids[0][inputs["input_ids"].shape[1]:]
+    gen_ids = output_ids[0][inputs["input_ids"].shape[1] :]
     generated = tokenizer.decode(gen_ids, skip_special_tokens=True)
     return {"generated_text": generated}
 
@@ -268,9 +398,9 @@ def answer_question(request: QARequest):
             do_sample=True,
             top_p=0.9,
             temperature=0.8,
-            pad_token_id=tokenizer.pad_token_id
+            pad_token_id=tokenizer.pad_token_id,
         )
-    gen_ids = output_ids[0][inputs["input_ids"].shape[1]:]
+    gen_ids = output_ids[0][inputs["input_ids"].shape[1] :]
     answer = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
     return {"answer": answer}
 
@@ -280,11 +410,13 @@ def _preprocess_image_to_tensor(img: Image.Image, img_size: int = 64):
 
     mean = (0.4914, 0.4822, 0.4465)
     std = (0.2470, 0.2435, 0.2616)
-    tf = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
-    ])
+    tf = transforms.Compose(
+        [
+            transforms.Resize((img_size, img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ]
+    )
     return tf(img).unsqueeze(0)
 
 
@@ -316,7 +448,9 @@ def train_cifar(
     import torch.optim as optim
     import torch.nn as nn
 
-    train_loader, test_loader = get_cifar10_loaders("/code/data/cifar10", batch_size=batch_size, img_size=64, augment=True)
+    train_loader, test_loader = get_cifar10_loaders(
+        str(DATA_ROOT / "cifar10"), batch_size=batch_size, img_size=64, augment=True
+    )
     model = classifier
     model.train()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -346,7 +480,12 @@ def train_cifar(
             total += targets.size(0)
     acc = correct / total if total > 0 else 0.0
 
-    return {"status": "trained", "epochs": epochs, "avg_train_loss": round(avg_loss, 4), "test_acc": round(acc, 4)}
+    return {
+        "status": "trained",
+        "epochs": epochs,
+        "avg_train_loss": round(avg_loss, 4),
+        "test_acc": round(acc, 4),
+    }
 
 
 @app.post("/train_gan_mnist")
@@ -355,7 +494,9 @@ def train_gan_mnist(
     batch_size: int = Query(128, ge=32, le=512),
     lr: float = Query(2e-4, gt=0),
 ):
-    train_loader = get_data_loader("/code/data/mnist", batch_size=batch_size, train=True)
+    train_loader = get_data_loader(
+        str(DATA_ROOT / "mnist"), batch_size=batch_size, train=True
+    )
     model = gan_model
     train_gan(
         model,
@@ -380,7 +521,9 @@ def gan_sample(n: int = Query(16, ge=1, le=64)):
         z = torch.randn(n, z_dim)
         imgs = model.generator(z).cpu()
 
-        grid = vutils.make_grid(imgs, nrow=int(n ** 0.5), normalize=True, value_range=(-1, 1))
+        grid = vutils.make_grid(
+            imgs, nrow=int(n ** 0.5), normalize=True, value_range=(-1, 1)
+        )
         np_img = grid.permute(1, 2, 0).mul(255).clamp(0, 255).byte().numpy()
         pil_img = Image.fromarray(np_img)
 
@@ -398,15 +541,14 @@ def gan_sample(n: int = Query(16, ge=1, le=64)):
     }
 
 
-# -----------------------------
-#     NEW: DIFFUSION SAMPLE
-# -----------------------------
 @app.get("/diffusion_sample")
 def diffusion_sample(
     n: int = Query(16, ge=1, le=64),
-    steps: int = Query(100, ge=10, le=1000)
+    steps: int = Query(100, ge=10, le=1000),
 ):
-    imgs = generate_samples(DIFFUSION_MODEL, device="cpu", num_samples=n, diffusion_steps=steps)
+    imgs = generate_samples(
+        DIFFUSION_MODEL, device="cpu", num_samples=n, diffusion_steps=steps
+    )
 
     grid = vutils.make_grid(imgs, nrow=int(n ** 0.5), normalize=True)
     np_img = grid.permute(1, 2, 0).mul(255).clamp(0, 255).byte().numpy()
@@ -426,9 +568,6 @@ def diffusion_sample(
     }
 
 
-# -----------------------------
-#     NEW: EBM SAMPLE
-# -----------------------------
 @app.get("/ebm_sample")
 def ebm_sample(
     n: int = Query(16, ge=1, le=64),
@@ -442,7 +581,7 @@ def ebm_sample(
         num_samples=n,
         steps=steps,
         step_size=step_size,
-        add_noise=noise
+        add_noise=noise,
     )
 
     grid = vutils.make_grid(imgs, nrow=int(n ** 0.5), normalize=True)
